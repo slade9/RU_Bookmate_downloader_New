@@ -5,3 +5,16 @@ pywebview[qt]; sys_platform == 'linux' or sys_platform == 'darwin'
 reportlab
 ebooklib
 BeautifulSoup4
+asyncio
+zipfile
+random
+os
+time
+re
+sys
+warnings
+json
+argparse
+shutil
+bs4
+httpx
