@@ -21,13 +21,6 @@ UA = {
     1: "Samsung/Galaxy_A51 Android/12 Bookmate/3.7.3",
     2: "Huawei/P40_Lite Android/11 Bookmate/3.7.3",
     3: "OnePlus/Nord_N10 Android/10 Bookmate/3.7.3"
-    # 4: "Google/Pixel_4a Android/9 Bookmate/3.7.3",
-    # 5: "Oppo/Reno_4 Android/8 Bookmate/3.7.3",
-    # 6: "Xiaomi/Redmi_Note_9 Android/10 Bookmate/3.7.3",
-    # 7: "Motorola/Moto_G_Power Android/10 Bookmate/3.7.3",
-    # 8: "Sony/Xperia_10 Android/10 Bookmate/3.7.3",
-    # 9: "LG/Velvet Android/10 Bookmate/3.7.3",
-    # 10: "Realme/6_Pro Android/10 Bookmate/3.7.3",
 }
 HEADERS = {
     'app-user-agent': UA[random.randint(1, 3)],
@@ -68,7 +61,6 @@ URLS = {
     }
 }
 
-
 def get_auth_token():
     if os.path.isfile("token.txt"):
         with open("token.txt", encoding='utf-8') as file:
@@ -79,7 +71,6 @@ def get_auth_token():
     with open("token.txt", "w", encoding='utf-8') as file:
         file.write(auth_token)
     return auth_token
-
 
 def run_auth_webview():
     import webview
@@ -99,61 +90,107 @@ def run_auth_webview():
     webview.start()
     return window.auth_token
 
-
 def replace_forbidden_chars(filename):
     forbidden_chars = '\\/:*?"<>|'
     chars = re.escape(forbidden_chars)
     return re.sub(f'[{chars}]', '', filename)
 
-
 async def download_file(url, file_path):
     is_download = False
     count = 0
+    filename = os.path.basename(file_path)
+    
     while not is_download:
-        async with httpx.AsyncClient(http2=True, verify=False) as client:
-            response = await client.get(url, headers=HEADERS, timeout=None)
-            if response.status_code == 200:
-                is_download = True
-                with open(file_path, 'wb') as file:
-                    file.write(response.content)
-                print(f"File downloaded successfully to {file_path}")
-            elif response.is_redirect:
-                response = await client.get(response.next_request.url)
-                if response.status_code == 200:
-                    is_download = True
-                    with open(file_path, 'wb') as file:
-                        file.write(response.content)
-                    print(f"File downloaded successfully to {file_path}")
-            else:
-                print(
-                    f"Failed to download file. Status code: {response.status_code}")
-                count += 1
-                if count == 3:
-                    print(
-                        "Failed to download the file check if the id is correct or try again later")
-                    sys.exit()
-                time.sleep(5)
+        try:
+            existing_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+            
+            async with httpx.AsyncClient(http2=True, verify=False, follow_redirects=True) as client:
+                req_headers = HEADERS.copy()
+                
+                # Добавляем заголовок Range для дозакачки, если файл уже частично скачан
+                if existing_size > 0:
+                    req_headers['Range'] = f'bytes={existing_size}-'
+                
+                async with client.stream('GET', url, headers=req_headers, timeout=None) as response:
+                    if response.status_code == 416:
+                        # 416 Requested Range Not Satisfiable означает, что файл уже полностью загружен
+                        print(f"\n[{filename}] Файл уже полностью скачан.")
+                        return
+                    elif response.status_code == 206:
+                        mode = 'ab' # Дозапись в конец файла
+                        total_size = existing_size + int(response.headers.get('content-length', 0))
+                    elif response.status_code == 200:
+                        mode = 'wb' # Сервер не поддержал Range, перезаписываем
+                        existing_size = 0
+                        total_size = int(response.headers.get('content-length', 0))
+                    else:
+                        print(f"\n[{filename}] Ошибка скачивания. Статус: {response.status_code}")
+                        count += 1
+                        if count >= 5:
+                            sys.exit(f"\nНе удалось скачать файл {filename}. Проверьте ID или повторите попытку позже.")
+                        await asyncio.sleep(5)
+                        continue
+                        
+                    with open(file_path, mode) as file:
+                        downloaded = existing_size
+                        
+                        # Функция для отрисовки текстового прогресс-бара
+                        def print_progress(current, total):
+                            if total > 0:
+                                percent = (current / total) * 100
+                                bar_length = 30
+                                filled_length = int(bar_length * current // total)
+                                bar = '█' * filled_length + '-' * (bar_length - filled_length)
+                                mb_curr = current / (1024 * 1024)
+                                mb_tot = total / (1024 * 1024)
+                                sys.stdout.write(f'\r[{filename[:20]}...] |{bar}| {percent:.1f}% ({mb_curr:.1f}/{mb_tot:.1f} MB)')
+                            else:
+                                mb_curr = current / (1024 * 1024)
+                                sys.stdout.write(f'\r[{filename[:20]}...] Загружено: {mb_curr:.2f} MB')
+                            sys.stdout.flush()
 
+                        print_progress(downloaded, total_size)
+                        
+                        # Загрузка блоками по 128 КБ
+                        async for chunk in response.aiter_bytes(chunk_size=1024 * 128):
+                            file.write(chunk)
+                            downloaded += len(chunk)
+                            print_progress(downloaded, total_size)
+                            
+                    is_download = True
+                    sys.stdout.write('\n')
+                    print(f"[{filename}] Загрузка успешно завершена.")
+
+        except (httpx.RequestError, httpx.StreamError) as e:
+            sys.stdout.write('\n')
+            print(f"[{filename}] Обрыв связи ({e}). Попытка восстановления ({count + 1}/5)...")
+            count += 1
+            if count >= 5:
+                sys.exit(f"\nПревышено количество попыток для файла {filename}. Завершение работы.")
+            await asyncio.sleep(5)
 
 async def send_request(url):
     is_download = False
     count = 0
     while not is_download:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(url, headers=HEADERS, timeout=None)
-            if response.status_code == 200:
-                is_download = True
-                return response
-            else:
-                print(
-                    f"Failed to send request. Status code: {response.status_code}")
-                count += 1
-                if count == 3:
-                    print(
-                        "Failed to download the file check if the id is correct or try again later")
-                    sys.exit()
-                time.sleep(5)
-
+        try:
+            async with httpx.AsyncClient(verify=False, follow_redirects=True) as client:
+                response = await client.get(url, headers=HEADERS, timeout=None)
+                if response.status_code == 200:
+                    is_download = True
+                    return response
+                else:
+                    print(f"Failed to send request. Status code: {response.status_code}")
+                    count += 1
+                    if count >= 5:
+                        sys.exit("Failed to download the file check if the id is correct or try again later")
+                    await asyncio.sleep(5)
+        except (httpx.RequestError, httpx.StreamError) as e:
+            print(f"Сетевая ошибка при запросе данных ({e}). Попытка {count + 1}/5...")
+            count += 1
+            if count >= 5:
+                sys.exit("Failed to send request due to network errors.")
+            await asyncio.sleep(5)
 
 def create_pdf_from_images(images_folder, output_pdf):
     c = canvas.Canvas(output_pdf, pagesize=letter)
@@ -169,7 +206,6 @@ def create_pdf_from_images(images_folder, output_pdf):
         os.remove(img_path)
     c.save()
     print(f"File downloaded successfully to {output_pdf}")
-
 
 def epub_to_fb2(epub_path, fb2_path):
     with warnings.catch_warnings():
@@ -191,7 +227,6 @@ def epub_to_fb2(epub_path, fb2_path):
 
     print(f"fb2 file save to {fb2_path}")
 
-
 def get_resource_info(resource_type, uuid, series=''):
     info_url = URLS[resource_type]['infoUrl'].format(uuid=uuid)
     info = asyncio.run(send_request(info_url)).json()
@@ -208,19 +243,16 @@ def get_resource_info(resource_type, uuid, series=''):
         print(f"File downloaded successfully to {path}.json")
     return path
 
-
 def get_resource_json(resource_type, uuid):
     url = URLS[resource_type]['contentUrl'].format(uuid=uuid)
     return asyncio.run(send_request(url)).json()
-
 
 def download_book(uuid, series='', serial_path=None):
     path = serial_path if serial_path else get_resource_info(
         'book', uuid, series)
     asyncio.run(download_file(
         URLS['book']['contentUrl'].format(uuid=uuid), f'{path}.epub'))
-    epub_to_fb2(f"{path}.epub", f"{path}.fb2")
-
+  #  epub_to_fb2(f"{path}.epub", f"{path}.fb2")
 
 def download_audiobook(uuid, series='', max_bitrate=False):
     path = get_resource_info('audiobook', uuid, series)
@@ -228,14 +260,11 @@ def download_audiobook(uuid, series='', max_bitrate=False):
     if resp:
         bitrate = 'max_bit_rate' if max_bitrate else 'min_bit_rate'
         json_data = resp['tracks']
-        files = os.listdir(os.path.dirname(path))
+        
         for track in json_data:
             name = f'Глава_{track["number"]+1}.m4a'
-            if name not in files:
-                download_url = track['offline'][bitrate]['url'].replace(".m3u8", ".m4a")
-                asyncio.run(download_file(
-                    download_url, f'{os.path.dirname(path)}/{name}'))
-
+            download_url = track['offline'][bitrate]['url'].replace(".m3u8", ".m4a")
+            asyncio.run(download_file(download_url, f'{os.path.dirname(path)}/{name}'))
 
 def download_comicbook(uuid, series=''):
     path = get_resource_info('comicbook', uuid, series)
@@ -249,7 +278,6 @@ def download_comicbook(uuid, series=''):
                       ignore_errors=False, onerror=None)
         create_pdf_from_images(os.path.dirname(path), f"{path}.pdf")
 
-
 def download_serial(uuid):
     path = get_resource_info('book', uuid)
     resp = get_resource_json('serial', uuid)
@@ -261,7 +289,6 @@ def download_serial(uuid):
             download_book(episode['uuid'],
                           serial_path=f'{download_dir}/{name}')
 
-
 def download_series(uuid):
     path = get_resource_info('series', uuid)
     resp = get_resource_json('series', uuid)
@@ -271,7 +298,6 @@ def download_series(uuid):
         print(part['resource_type'], part['resource']['uuid'])
         func = FUNCTION_MAP[part['resource_type']]
         func(part['resource']['uuid'], f"{name}/{part_index+1}. ")
-
 
 def main():
     argparser = argparse.ArgumentParser()
@@ -287,7 +313,6 @@ def main():
         func(args.uuid, max_bitrate=args.max_bitrate)
     else:
         func(args.uuid)
-
 
 FUNCTION_MAP = {
     'book': download_book,
